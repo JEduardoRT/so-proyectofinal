@@ -33,7 +33,7 @@ typedef struct {
 } Bateria;
 
 sem_t bat_sem;
-sem_t ruedas_sem; // Declaración del semáforo
+sem_t ruedas_sem;
 Rueda *ruedas;
 Bateria *bateria;
 double velocidad_crucero;
@@ -97,11 +97,11 @@ void *frenar_rueda(void *arg, int *tiempo_frenado) {
             }
             
             // Regenerar la batería durante los primeros 4 segundos
-            if (tiempo_frenado < TIEMPO_REGENERACION) {
+            if (*tiempo_frenado < TIEMPO_REGENERACION) {
                 sem_wait(&bat_sem);
                 bateria->nivel_carga += TASA_CARGA * (rueda->velocidad_actual / velocidad_crucero);
                 sem_post(&bat_sem);
-                *tiempo_frenado++;
+                (*tiempo_frenado)++;
             }
         }
     }
@@ -112,12 +112,11 @@ void *inicializar_rueda(void *arg) {
 
     Rueda *rueda = (Rueda *)arg;
     int tiempo_frenado = 0;
-    int *tf = &tiempo_frenado;
     while (rueda->activo) {
         if(rueda->accion==1){
             acelerar_rueda(rueda);
         }else if(rueda->accion==2){
-            frenar_rueda(rueda, tf);
+            frenar_rueda(rueda, &tiempo_frenado);
         }
         if(rueda->accion!=2){
             tiempo_frenado=0;
