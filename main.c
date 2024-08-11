@@ -82,7 +82,6 @@ void *acelerar_rueda(void *arg) {
                 rueda->velocidad_actual = velocidad_crucero;
             }
         }
-        //bateria.nivel_carga DEACARGAR BATERIA
     }
     return NULL;
 }
@@ -91,7 +90,6 @@ void *frenar_rueda(void *arg, int *tiempo_frenado) {
     Rueda *rueda = (Rueda *)arg;
     if (rueda->activo) {
         double frenado = aceleracion * 2;
-        int *tiempo_frenado = 0;
         if (rueda->velocidad_actual > 0) {
             rueda->velocidad_actual -= frenado;
             if (rueda->velocidad_actual < 0) {
@@ -99,7 +97,7 @@ void *frenar_rueda(void *arg, int *tiempo_frenado) {
             }
             
             // Regenerar la batería durante los primeros 4 segundos
-            if (*tiempo_frenado < TIEMPO_REGENERACION) {
+            if (tiempo_frenado < TIEMPO_REGENERACION) {
                 sem_wait(&bat_sem);
                 bateria->nivel_carga += TASA_CARGA * (rueda->velocidad_actual / velocidad_crucero);
                 sem_post(&bat_sem);
@@ -158,6 +156,12 @@ int encender_vehiculo() {
     return 1;
 }
 
+// Función para mostrar el menú
+void mostrar_menu(double velocidad, char *estado, double bateria, char *accion) {
+    limpiar_pantalla();
+    printf("Velocidad: %.2f Km/h,  Estado: %s, Batería: %.2f%%, Acción vehículo: %s\nEscriba una acción:\na: acelerar\nf: frenar\ne: encender\nx: apagar\ns: salir\n>> ", velocidad, estado, bateria, accion);
+}
+
 int gestion_auto(){
     int ruedas_activas = 4;
     int status;
@@ -183,7 +187,7 @@ int gestion_auto(){
                     }
                 }else if(ruedas[i].pid>0){
                     kill(ruedas[i].pid,SIGTERM); 
-                    sem_post(&ruedas_sem);               
+                    sem_wait(&ruedas_sem);               
                     ruedas[i].accion = 0;
                     ruedas[i].pid = 0;
                     strcpy(ruedas[i].estado,"SIN EFECTO");  
@@ -201,6 +205,10 @@ int gestion_auto(){
                 ruedas_activas=0;
             }
         }
+
+        // Volver a mostrar el menú después de cada acción
+        mostrar_menu(obtener_velocidad(ruedas), estado, bateria->nivel_carga, accion);
+        sleep(0.2);
     }
     return 0;
 }
@@ -217,18 +225,7 @@ int apagar_vehiculo() {
 //---------------------------------------------------------------------------------------------------------------------
 
 //---------------------------------------------SECCION DE MENU------------------------------------------------------------
-// Función para mostrar el menú
-void mostrar_menu(int velocidad, char *estado, int bateria, char *accion) {
-    limpiar_pantalla();
-    printf("Velocidad: %d Km/h,  Estado: %s, Batería: %d%%, Acción vehículo: %s\n", velocidad, estado, bateria, accion);
-    printf("Escriba una acción:\n");
-    printf("a: acelerar\n");
-    printf("f: frenar\n");
-    printf("e: encender\n");
-    printf("x: apagar\n");
-    printf("s: salir\n");
-    printf(">> ");
-}
+
 
 int main(int argc, char *argv[]) {
     int opt;
@@ -360,7 +357,7 @@ int main(int argc, char *argv[]) {
                     if(pid==0){
                         exit(gestion_auto());
                     }else if(pid>0){
-                        sleep(1.5);
+                        sleep(1);
                     }
                 }
                 break;
@@ -378,8 +375,6 @@ int main(int argc, char *argv[]) {
                 break;
         }
 
-        // Volver a mostrar el menú después de cada acción
-        mostrar_menu(obtener_velocidad(ruedas), estado, bateria->nivel_carga, accion);
     } while (strcmp(estado,"APAGADO")!=0);
 
     
