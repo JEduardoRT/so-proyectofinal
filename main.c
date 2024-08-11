@@ -7,6 +7,8 @@
 #include <semaphore.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/shm.h>
+#include <sys/ipc.h>
 
 //CONSTANTES
 #define NUM_RUEDAS 4
@@ -32,13 +34,19 @@ typedef struct {
 
 sem_t bat_sem;
 sem_t ruedas_sem; // Declaración del semáforo
-Rueda ruedas[NUM_RUEDAS];
-Bateria bateria;
+Rueda *ruedas;
+Bateria *bateria;
 double velocidad_crucero;
 double aceleracion;
-char estado[20] = "APAGADO";
-char accion[20] = "SIN EFECTO";
-int accion_auto;
+char *estado;
+char *accion;
+int *accion_auto;
+
+int shm_id_ruedas;
+int shm_id_bateria;
+int shm_id_estado;
+int shm_id_accion;
+int shm_id_accion_auto;
 
 //-------------------------------------SECCION DE AYUDA------------------------------------------------
 //Mostrar ayuda del programa: -h
@@ -56,6 +64,14 @@ void limpiar_pantalla() {
 //-----------------------------------------------------------------------------------------------------
 
 //---------------------------------FUNCIONES AUTO----------------------------------------------------
+double obtener_velocidad(Rueda *ruedas){
+    double velocidad_final=0;
+    for (int i = 0; i < NUM_RUEDAS; i++) {
+            velocidad_final += ruedas[i].velocidad_actual;
+    }
+    return velocidad_final/NUM_RUEDAS;
+}
+
 void *acelerar_rueda(void *arg) {
 
     Rueda *rueda = (Rueda *)arg;
@@ -75,7 +91,7 @@ void *frenar_rueda(void *arg, int *tiempo_frenado) {
     Rueda *rueda = (Rueda *)arg;
     if (rueda->activo) {
         double frenado = aceleracion * 2;
-        int tiempo_frenado = 0;
+        int *tiempo_frenado = 0;
         if (rueda->velocidad_actual > 0) {
             rueda->velocidad_actual -= frenado;
             if (rueda->velocidad_actual < 0) {
@@ -83,11 +99,11 @@ void *frenar_rueda(void *arg, int *tiempo_frenado) {
             }
             
             // Regenerar la batería durante los primeros 4 segundos
-            if (tiempo_frenado < TIEMPO_REGENERACION) {
+            if (*tiempo_frenado < TIEMPO_REGENERACION) {
                 sem_wait(&bat_sem);
-                bateria.nivel_carga += TASA_CARGA * (rueda->velocidad_actual / velocidad_crucero);
+                bateria->nivel_carga += TASA_CARGA * (rueda->velocidad_actual / velocidad_crucero);
                 sem_post(&bat_sem);
-                tiempo_frenado++;
+                *tiempo_frenado++;
             }
         }
     }
@@ -98,18 +114,19 @@ void *inicializar_rueda(void *arg) {
 
     Rueda *rueda = (Rueda *)arg;
     int tiempo_frenado = 0;
+    int *tf = &tiempo_frenado;
     while (rueda->activo) {
         if(rueda->accion==1){
-            acelerar_rueda(&rueda);
+            acelerar_rueda(rueda);
         }else if(rueda->accion==2){
-            frenar_rueda(&rueda, &tiempo_frenado);
+            frenar_rueda(rueda, tf);
         }
         if(rueda->accion!=2){
             tiempo_frenado=0;
         }    
         if(tiempo_frenado>= TIEMPO_REGENERACION || rueda->accion!=2){
             sem_wait(&bat_sem);
-                bateria.nivel_carga -= TASA_DESCARGA*(rueda->velocidad_actual/velocidad_crucero);
+                bateria->nivel_carga -= TASA_DESCARGA*(rueda->velocidad_actual/velocidad_crucero);
             sem_post(&bat_sem);  
         }
         sleep(1); // Simular el tiempo de aceleración
@@ -119,8 +136,8 @@ void *inicializar_rueda(void *arg) {
 
 int encender_vehiculo() {
     if(strcmp(estado,"ENCENDIDO")!=0){
-        bateria.nivel_carga = 100.0;
-        strcpy(bateria.estado, "ESTABLE");
+        bateria->nivel_carga = 100.0;
+        strcpy(bateria->estado, "ESTABLE");
         pid_t cpid;
         for (int i = 0; i < NUM_RUEDAS; i++) {
             ruedas[i].id = i;
@@ -146,7 +163,7 @@ int gestion_auto(){
     int status;
     pid_t rueda_pid;
     while (ruedas_activas > 0) {
-        if(accion_auto==0){
+        if(*accion_auto==0){
             for (int i = 0; i < NUM_RUEDAS; i++) {
                 if(ruedas[i].activo){
                     rueda_pid = waitpid(ruedas[i].pid, &status, WNOHANG);
@@ -175,12 +192,12 @@ int gestion_auto(){
                 }
             }
         }
-        else if(accion_auto==1){
+        else if(*accion_auto==1){
             if(encender_vehiculo()){
                 strcpy(estado, "ENCENDIDO");
-                accion_auto=0;
+                *accion_auto=0;
             }else{
-                accion_auto=-1;
+                *accion_auto=-1;
                 ruedas_activas=0;
             }
         }
@@ -218,8 +235,8 @@ int main(int argc, char *argv[]) {
     int valor_v = -1;
     int valor_a = -1;
     pid_t pid;
-    sem_init(&bat_sem,0,1);
-    sem_init(&ruedas_sem,0,1);
+    sem_init(&bat_sem,1,1);
+    sem_init(&ruedas_sem,1,1);
 
     // Procesar los argumentos de la línea de comandos
     while ((opt = getopt(argc, argv, "v:a:h")) != -1) {
@@ -249,8 +266,66 @@ int main(int argc, char *argv[]) {
     aceleracion = valor_a;
     char opcion;
 
+    shm_id_ruedas = shmget(IPC_PRIVATE, NUM_RUEDAS*sizeof(Rueda), IPC_CREAT | 0666);
+    if (shm_id_ruedas == -1) {
+        perror("shmget");
+        exit(1);
+    }
+    // Asociar el segmento de memoria compartida
+    ruedas = (Rueda *)shmat(shm_id_ruedas, NULL, 0);
+    if (ruedas == (void *)-1) {
+        perror("shmat");
+        exit(1);
+    }
+    shm_id_bateria = shmget(IPC_PRIVATE, sizeof(Bateria), IPC_CREAT | 0666);
+    if (shm_id_bateria == -1) {
+        perror("shmget");
+        exit(1);
+    }
+    // Asociar el segmento de memoria compartida
+    bateria = (Bateria *)shmat(shm_id_bateria, NULL, 0);
+    if (bateria == (void *)-1) {
+        perror("shmat");
+        exit(1);
+    }
+    shm_id_estado = shmget(IPC_PRIVATE, 20*sizeof(char), IPC_CREAT | 0666);
+    if (shm_id_estado == -1) {
+        perror("shmget");
+        exit(1);
+    }
+    // Asociar el segmento de memoria compartida
+    estado = (char *)shmat(shm_id_estado, NULL, 0);
+    if (estado == (void *)-1) {
+        perror("shmat");
+        exit(1);
+    }
+    shm_id_accion = shmget(IPC_PRIVATE, 20*sizeof(char), IPC_CREAT | 0666);
+    if (shm_id_accion == -1) {
+        perror("shmget");
+        exit(1);
+    }
+    // Asociar el segmento de memoria compartida
+    accion = (char *)shmat(shm_id_accion, NULL, 0);
+    if (accion == (void *)-1) {
+        perror("shmat");
+        exit(1);
+    }
+    shm_id_accion_auto = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0666);
+    if (shm_id_accion_auto == -1) {
+        perror("shmget");
+        exit(1);
+    }
+    // Asociar el segmento de memoria compartida
+    accion_auto = (int *)shmat(shm_id_accion_auto, NULL, 0);
+    if (accion_auto == (void *)-1) {
+        perror("shmat");
+        exit(1);
+    }
+    
+    strcpy(estado,"APAGADO");
+    strcpy(accion,"SIN EFECTO");
     // Mostrar el menú inicial
-    mostrar_menu(0, estado, bateria.nivel_carga, accion);
+    mostrar_menu(0, estado, bateria->nivel_carga, accion);
 
     // Loop para manejar las acciones del usuario
     do {
@@ -259,7 +334,7 @@ int main(int argc, char *argv[]) {
 
         switch (opcion) {
             case 'a':
-                if(bateria.nivel_carga>0){
+                if(bateria->nivel_carga>0){
                     for (int i = 0; i < NUM_RUEDAS; i++) {
                         if(ruedas[i].activo){
                             ruedas[i].accion = 1;
@@ -269,7 +344,7 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             case 'f':
-                if(bateria.nivel_carga>0){
+                if(bateria->nivel_carga>0){
                     for (int i = 0; i < NUM_RUEDAS; i++) {
                         if(ruedas[i].activo){
                             ruedas[i].accion = 2;
@@ -280,7 +355,7 @@ int main(int argc, char *argv[]) {
                 break;
             case 'e':
                 if(strcmp(estado,"ENCENDIDO")!=0){
-                    accion_auto = 1;
+                    *accion_auto = 1;
                     pid = fork();
                     if(pid==0){
                         exit(gestion_auto());
@@ -304,7 +379,7 @@ int main(int argc, char *argv[]) {
         }
 
         // Volver a mostrar el menú después de cada acción
-        mostrar_menu(0, estado, bateria.nivel_carga, accion);
+        mostrar_menu(obtener_velocidad(ruedas), estado, bateria->nivel_carga, accion);
     } while (strcmp(estado,"APAGADO")!=0);
 
     
