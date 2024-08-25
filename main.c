@@ -23,7 +23,7 @@ typedef struct {
     char estado[20];
     int activo;
     int accion;
-    pid_t pid; 
+    pthread_t thread_id; 
 } Rueda;
 
 //Batería
@@ -41,6 +41,8 @@ float aceleracion;
 char *estado;
 char *accion;
 int *accion_auto;
+pthread_mutex_t console_lock;
+int run_update = 1; // Bandera para detener la actualización
 
 int shm_id_ruedas;
 int shm_id_bateria;
@@ -66,10 +68,18 @@ void limpiar_pantalla() {
 //---------------------------------FUNCIONES AUTO----------------------------------------------------
 float obtener_velocidad(Rueda *ruedas){
     float velocidad_final=0.f;
+    int resta = 0;
     for (int i = 0; i < NUM_RUEDAS; i++) {
+        if(!strcmp(ruedas[i].estado,"SIN EFECTO")){
             velocidad_final += ruedas[i].velocidad_actual;
+        }else{
+            resta++;
+        }
     }
-    return velocidad_final/NUM_RUEDAS;
+    if(resta>=NUM_RUEDAS){
+        return 0.f;
+    }
+    return velocidad_final/(NUM_RUEDAS-resta);
 }
 
 void *acelerar_rueda(void *arg) {
@@ -100,6 +110,9 @@ void *frenar_rueda(void *arg, int *tiempo_frenado) {
             if (*tiempo_frenado < TIEMPO_REGENERACION) {
                 sem_wait(&bat_sem);
                 bateria->nivel_carga += TASA_CARGA * (rueda->velocidad_actual / velocidad_crucero);
+                if(bateria->nivel_carga>100){
+                    bateria->nivel_carga=100;
+                }
                 sem_post(&bat_sem);
                 (*tiempo_frenado)++;
             }
@@ -124,6 +137,9 @@ void *inicializar_rueda(void *arg) {
         if(tiempo_frenado>= TIEMPO_REGENERACION || rueda->accion!=2){
             sem_wait(&bat_sem);
                 bateria->nivel_carga -= TASA_DESCARGA*(rueda->velocidad_actual/velocidad_crucero);
+                if(bateria->nivel_carga<0){
+                    bateria->nivel_carga=0;
+                }
             sem_post(&bat_sem);  
         }
         sleep(1); // Simular el tiempo de aceleración
@@ -135,24 +151,32 @@ int encender_vehiculo() {
     if(strcmp(estado,"ENCENDIDO")!=0){
         bateria->nivel_carga = 100.0;
         strcpy(bateria->estado, "ESTABLE");
-        pid_t cpid;
         for (int i = 0; i < NUM_RUEDAS; i++) {
             ruedas[i].id = i;
             ruedas[i].velocidad_actual = 0.f;
             strcpy(ruedas[i].estado, "SIN EFECTO");
             ruedas[i].activo = 1;
-            cpid = fork();
-            if(cpid==0){
-                inicializar_rueda((void *)&ruedas[i]);
-                exit(0);
-            }
-            else if(cpid>0){
-                ruedas[i].pid = cpid;
-            }
+            pthread_create(&ruedas[i].thread_id, NULL, inicializar_rueda, (void *)&ruedas[i]);
         }         
             
     }
     return 1;
+}
+
+// Mueve el cursor a una posición específica en la consola
+void mover_cursor(int row, int col) {
+    printf("\033[%d;%dH", row, col);
+}
+
+// Actualiza los valores en la consola sin refrescar toda la pantalla
+void *actualizar_pantalla(void *arg) {
+    while(run_update){
+        mover_cursor(1, 1);  // Mueve el cursor a la posición donde están los valores
+        printf("Velocidad: %.2f Km/h,  Estado: %s, Batería: %.2f%%, Acción vehículo: %s\n", obtener_velocidad(ruedas), estado, bateria->nivel_carga, accion);    
+        mover_cursor(8, 4);
+        fflush(stdout); // Asegura que la salida se muestre inmediatamente
+        sleep(0.1);
+    }
 }
 
 // Función para mostrar el menú
@@ -161,41 +185,44 @@ void mostrar_menu(float velocidad, char *estado, float bateria, char *accion) {
     printf("Velocidad: %.2f Km/h,  Estado: %s, Batería: %.2f%%, Acción vehículo: %s\nEscriba una acción:\na: acelerar\nf: frenar\ne: encender\nx: apagar\ns: salir\n>> ", velocidad, estado, bateria, accion);
 }
 
+int apagar_vehiculo() {
+    for (int i = 0; i < NUM_RUEDAS; i++) {
+        sem_wait(&ruedas_sem);
+        ruedas[i].activo = 0;
+        sem_post(&ruedas_sem);
+    }
+    return 1; 
+}
+
 int gestion_auto(){
     int ruedas_activas = 4;
     int status;
     pid_t rueda_pid;
     while (ruedas_activas > 0) {
         if(*accion_auto==0){
+            if(bateria->nivel_carga<=0){
+                if(apagar_vehiculo()){
+                    strcpy(estado, "APAGADO");
+                    strcpy(accion, "SIN EFECTO");
+                }
+            }
             for (int i = 0; i < NUM_RUEDAS; i++) {
-                if(ruedas[i].activo){
-                    rueda_pid = waitpid(ruedas[i].pid, &status, WNOHANG);
-                    if (rueda_pid == -1) {
-                        if (WIFEXITED(status)) {
-                            sem_wait(&ruedas_sem); 
-                            ruedas[i].activo = 0;
-                            ruedas[i].accion = 0;
-                            ruedas[i].pid = 0;
-                            strcpy(ruedas[i].estado,"SIN EFECTO"); 
-                            sem_post(&ruedas_sem);                        
-                            ruedas_activas--;
-                        }
-                    } else if (rueda_pid > 0) {
-                        if (WIFEXITED(status)) {
-                            sem_wait(&ruedas_sem); 
-                            ruedas[i].activo = 0;
-                            ruedas[i].accion = 0;
-                            ruedas[i].pid = 0;
-                            strcpy(ruedas[i].estado,"SIN EFECTO"); 
-                            sem_post(&ruedas_sem);                        
-                            ruedas_activas--;
-                        }
+                if (ruedas[i].activo) {
+                    int res = pthread_kill(ruedas[i].thread_id, 0);
+                    if (res != 0) { // Si el hilo ha terminado o ha sido terminado
+                        sem_wait(&ruedas_sem); 
+                        ruedas[i].activo = 0;
+                        ruedas[i].accion = 0;
+                        strcpy(ruedas[i].estado,"SIN EFECTO");
+                        ruedas[i].thread_id = 0; 
+                        sem_post(&ruedas_sem);
+                        ruedas_activas--;
                     }
-                }else if(ruedas[i].pid>0){
-                    kill(ruedas[i].pid,SIGTERM); 
+                }else if(ruedas[i].thread_id>0){
+                    pthread_join(ruedas[i].thread_id,NULL);
                     sem_wait(&ruedas_sem);               
                     ruedas[i].accion = 0;
-                    ruedas[i].pid = 0;
+                    ruedas[i].thread_id = 0;
                     strcpy(ruedas[i].estado,"SIN EFECTO");  
                     sem_post(&ruedas_sem);                           
                     ruedas_activas--;         
@@ -211,22 +238,11 @@ int gestion_auto(){
                 ruedas_activas=0;
             }
         }
-
-        // Volver a mostrar el menú después de cada acción
-        mostrar_menu(obtener_velocidad(ruedas), estado, bateria->nivel_carga, accion);
         sleep(0.2);
     }
     return 0;
 }
 
-int apagar_vehiculo() {
-    for (int i = 0; i < NUM_RUEDAS; i++) {
-        sem_wait(&ruedas_sem);
-        ruedas[i].activo = 0;
-        sem_post(&ruedas_sem);
-    }
-    return 1; 
-}
 
 //---------------------------------------------------------------------------------------------------------------------
 
@@ -237,7 +253,7 @@ int main(int argc, char *argv[]) {
     int opt;
     float valor_v = -1;
     float valor_a = -1;
-    pid_t pid;
+    pthread_t gestion_id;
     sem_init(&bat_sem,1,1);
     sem_init(&ruedas_sem,1,1);
 
@@ -329,11 +345,18 @@ int main(int argc, char *argv[]) {
     strcpy(accion,"SIN EFECTO");
     // Mostrar el menú inicial
     mostrar_menu(0, estado, bateria->nivel_carga, accion);
+    
+    pthread_t update_thread;
+
+    pthread_mutex_init(&console_lock, NULL);
+    pthread_create(&update_thread, NULL, actualizar_pantalla, NULL);
 
     // Loop para manejar las acciones del usuario
     do {
+        pthread_mutex_lock(&console_lock);
         opcion = getchar();
-        getchar(); // Para capturar el newline
+        getchar(); // Capturar el newline
+        pthread_mutex_unlock(&console_lock);
 
         switch (opcion) {
             case 'a':
@@ -359,22 +382,22 @@ int main(int argc, char *argv[]) {
             case 'e':
                 if(strcmp(estado,"ENCENDIDO")!=0){
                     *accion_auto = 1;
-                    pid = fork();
-                    if(pid==0){
-                        exit(gestion_auto());
-                    }else if(pid>0){
-                        sleep(1);
-                    }
+                    pthread_create(&gestion_id, NULL, (void *)gestion_auto, NULL);
+                    sleep(1);
+                    pthread_detach(gestion_id);
                 }
                 break;
             case 'x':
                 if(apagar_vehiculo()){
                     strcpy(estado, "APAGADO");
                     strcpy(accion, "SIN EFECTO");
+                    run_update = 0;
+                    mostrar_menu(obtener_velocidad(ruedas), estado, bateria->nivel_carga, accion);
                 }
                 break;
             case 's':
                 printf("Saliendo...\n");
+                run_update = 0;
                 return 0;
             default:
                 printf("Opción no válida\n");
@@ -386,6 +409,8 @@ int main(int argc, char *argv[]) {
     
     sem_destroy(&bat_sem);
     sem_destroy(&ruedas_sem);
+    pthread_join(update_thread, NULL);
+    pthread_mutex_destroy(&console_lock);
     return 0;
 }
 
