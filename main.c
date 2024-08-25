@@ -19,7 +19,7 @@
 //Rueda
 typedef struct {
     int id;
-    double velocidad_actual;
+    float velocidad_actual;
     char estado[20];
     int activo;
     int accion;
@@ -28,7 +28,7 @@ typedef struct {
 
 //Batería
 typedef struct {
-    double nivel_carga;
+    float nivel_carga;
     char estado[20];
 } Bateria;
 
@@ -36,8 +36,8 @@ sem_t bat_sem;
 sem_t ruedas_sem;
 Rueda *ruedas;
 Bateria *bateria;
-double velocidad_crucero;
-double aceleracion;
+float velocidad_crucero;
+float aceleracion;
 char *estado;
 char *accion;
 int *accion_auto;
@@ -54,7 +54,7 @@ void mostrar_ayuda() {
     printf("Uso: ./suyay -v <valor_decimal> -a <valor_dcimal>\n");
     printf("Parámetros:\n");
     printf("  -v <x.x>  Valor de velocidad crucero en km/h\n");
-    printf("  -a <x.x>  Valor de tasa de aceleracion en km/h2'\n");
+    printf("  -a <x.x>  Valor de tasa de aceleracion en km/h^2'\n");
     printf("  -h                 Mostrar esta ayuda\n");
 }
 
@@ -64,8 +64,8 @@ void limpiar_pantalla() {
 //-----------------------------------------------------------------------------------------------------
 
 //---------------------------------FUNCIONES AUTO----------------------------------------------------
-double obtener_velocidad(Rueda *ruedas){
-    double velocidad_final=0;
+float obtener_velocidad(Rueda *ruedas){
+    float velocidad_final=0.f;
     for (int i = 0; i < NUM_RUEDAS; i++) {
             velocidad_final += ruedas[i].velocidad_actual;
     }
@@ -89,11 +89,11 @@ void *acelerar_rueda(void *arg) {
 void *frenar_rueda(void *arg, int *tiempo_frenado) {
     Rueda *rueda = (Rueda *)arg;
     if (rueda->activo) {
-        double frenado = aceleracion * 2;
+        float frenado = aceleracion * 2.f;
         if (rueda->velocidad_actual > 0) {
             rueda->velocidad_actual -= frenado;
             if (rueda->velocidad_actual < 0) {
-                rueda->velocidad_actual = 0;
+                rueda->velocidad_actual = 0.f;
             }
             
             // Regenerar la batería durante los primeros 4 segundos
@@ -138,7 +138,7 @@ int encender_vehiculo() {
         pid_t cpid;
         for (int i = 0; i < NUM_RUEDAS; i++) {
             ruedas[i].id = i;
-            ruedas[i].velocidad_actual = 0.0;
+            ruedas[i].velocidad_actual = 0.f;
             strcpy(ruedas[i].estado, "SIN EFECTO");
             ruedas[i].activo = 1;
             cpid = fork();
@@ -156,7 +156,7 @@ int encender_vehiculo() {
 }
 
 // Función para mostrar el menú
-void mostrar_menu(double velocidad, char *estado, double bateria, char *accion) {
+void mostrar_menu(float velocidad, char *estado, float bateria, char *accion) {
     limpiar_pantalla();
     printf("Velocidad: %.2f Km/h,  Estado: %s, Batería: %.2f%%, Acción vehículo: %s\nEscriba una acción:\na: acelerar\nf: frenar\ne: encender\nx: apagar\ns: salir\n>> ", velocidad, estado, bateria, accion);
 }
@@ -171,8 +171,15 @@ int gestion_auto(){
                 if(ruedas[i].activo){
                     rueda_pid = waitpid(ruedas[i].pid, &status, WNOHANG);
                     if (rueda_pid == -1) {
-                        perror("waitpid");
-                        exit(1);
+                        if (WIFEXITED(status)) {
+                            sem_wait(&ruedas_sem); 
+                            ruedas[i].activo = 0;
+                            ruedas[i].accion = 0;
+                            ruedas[i].pid = 0;
+                            strcpy(ruedas[i].estado,"SIN EFECTO"); 
+                            sem_post(&ruedas_sem);                        
+                            ruedas_activas--;
+                        }
                     } else if (rueda_pid > 0) {
                         if (WIFEXITED(status)) {
                             sem_wait(&ruedas_sem); 
@@ -228,8 +235,8 @@ int apagar_vehiculo() {
 
 int main(int argc, char *argv[]) {
     int opt;
-    int valor_v = -1;
-    int valor_a = -1;
+    float valor_v = -1;
+    float valor_a = -1;
     pid_t pid;
     sem_init(&bat_sem,1,1);
     sem_init(&ruedas_sem,1,1);
@@ -238,10 +245,10 @@ int main(int argc, char *argv[]) {
     while ((opt = getopt(argc, argv, "v:a:h")) != -1) {
         switch (opt) {
             case 'v':
-                valor_v = atoi(optarg);
+                valor_v = atof(optarg);
                 break;
             case 'a':
-                valor_a = atoi(optarg);
+                valor_a = atof(optarg);
                 break;
             case 'h':
                 mostrar_ayuda();
